@@ -1,0 +1,9 @@
+{
+  "name": "bharat-builds-janurja",
+  "rewrites": [
+    {
+      "source": "/(.*)",
+      "destination": "/index.html"
+    }
+  ]
+}

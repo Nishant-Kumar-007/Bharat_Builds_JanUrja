@@ -1,0 +1,156 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  JanUrja Energy Intelligence Agent Backend (Zero-Cost Free Tier Architecture)
+  Serverless microgrid matching, dynamic pricing, and feeder intelligence
+  powered by FastAPI, AWS Strands Agents SDK, and Google Gemini API.
+  Uses ONLY AWS "Always Free" services: Lambda with Function URLs,
+  SSM Standard Parameters, and DynamoDB (25 RCU/WCU, 25 GB free forever).
+
+Globals:
+  Function:
+    Timeout: 30
+    MemorySize: 512
+    Runtime: python3.11
+    Architectures:
+      - x86_64
+    Environment:
+      Variables:
+        SSM_GEMINI_KEY_PARAM: !Ref GeminiKeyParamName
+        GEMINI_MODEL_ID: !Ref GeminiModelId
+        MODEL_TEMPERATURE: !Ref ModelTemperature
+        GRID_EVENTS_TABLE_NAME: !Ref GridEventsTable
+        GRID_ALERTS_TOPIC_ARN: ''
+        CORS_ORIGINS: !Join [',', !Ref CorsOrigins]
+        SIMULATION_MODE: 'true'
+
+Parameters:
+  GeminiKeyParamName:
+    Type: String
+    Default: /janurja/gemini_api_key
+    Description: SSM Parameter Store SecureString parameter name storing the Google Gemini API key (Standard tier, 100% free).
+
+  GeminiModelId:
+    Type: String
+    Default: gemini-3.8-flash
+    Description: Supported Google Gemini model identifier.
+
+  ModelTemperature:
+    Type: String
+    Default: '0.2'
+    Description: LLM reasoning temperature (0.0 to 1.0).
+
+  CorsOrigins:
+    Type: CommaDelimitedList
+    Default: 'http://localhost:5173,http://localhost:3000,http://127.0.0.1:5173'
+    Description: Comma-separated allowed origins for Lambda Function URL CORS (e.g. your Vercel deployment URL).
+
+Resources:
+  # ============================================================================
+  # 1. AWS Lambda Function — Core Backend (FastAPI via Mangum + Free Function URL)
+  # ALWAYS FREE: 1,000,000 requests/month + 400,000 GB-seconds compute free forever.
+  # Function URLs have $0 endpoint fee (unlike API Gateway).
+  # ============================================================================
+  EnergyAgentFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: app.main.handler
+      CodeUri: .
+      Description: Core JanUrja Energy Intelligence API handler
+      ReservedConcurrentExecutions: 5
+      FunctionUrlConfig:
+        AuthType: NONE
+        Cors:
+          AllowMethods:
+            - GET
+            - POST
+            - OPTIONS
+          AllowHeaders:
+            - Content-Type
+            - Authorization
+          AllowOrigins: !Ref CorsOrigins
+          MaxAge: 600
+      Policies:
+        # Least-privilege: Read-only access to specific SSM parameter (Standard parameter is 100% free)
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - ssm:GetParameter
+              Resource: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${GeminiKeyParamName}'
+            - Effect: Allow
+              Action:
+                - kms:Decrypt
+              Resource: '*'
+              Condition:
+                StringEquals:
+                  kms:CallerAccount: !Sub '${AWS::AccountId}'
+        # Least-privilege: Strictly scoped to PutItem, Query, and GetItem for the JanUrja DynamoDB table
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:PutItem
+                - dynamodb:Query
+                - dynamodb:GetItem
+              Resource:
+                - !GetAtt GridEventsTable.Arn
+                - !Sub '${GridEventsTable.Arn}/index/*'
+
+  # ============================================================================
+  # 2. Amazon CloudWatch Log Group (7-Day Retention to stay strictly within 5GB Free Tier)
+  # ALWAYS FREE: 5 GB ingestion & storage per month forever.
+  # ============================================================================
+  EnergyAgentLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${EnergyAgentFunction}'
+      RetentionInDays: 7
+
+  # ============================================================================
+  # 3. Amazon DynamoDB Table (Standard Provisioned Mode)
+  # ALWAYS FREE: 25 RCU, 25 WCU, and 25 GB storage free forever (up to 200M requests/mo).
+  # ============================================================================
+  GridEventsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: JanUrjaGridEvents
+      BillingMode: PROVISIONED
+      ProvisionedThroughput:
+        ReadCapacityUnits: 5
+        WriteCapacityUnits: 5
+      AttributeDefinitions:
+        - AttributeName: event_type
+          AttributeType: S
+        - AttributeName: timestamp
+          AttributeType: S
+      KeySchema:
+        - AttributeName: event_type
+          KeyType: HASH
+        - AttributeName: timestamp
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: expiration_ttl
+        Enabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: false
+      Tags:
+        - Key: Project
+          Value: JanUrja
+        - Key: Tier
+          Value: AlwaysFree
+
+Outputs:
+  FunctionUrl:
+    Description: Direct HTTPS URL for JanUrja Energy Intelligence API ($0 endpoint fee)
+    Value: !GetAtt EnergyAgentFunctionUrl.FunctionUrl
+
+  HealthCheckUrl:
+    Description: URL for application health status check
+    Value: !Sub '${EnergyAgentFunctionUrl.FunctionUrl}api/health'
+
+  DynamoDBTableName:
+    Description: DynamoDB Table Name (Always Free Tier)
+    Value: !Ref GridEventsTable
+
+
